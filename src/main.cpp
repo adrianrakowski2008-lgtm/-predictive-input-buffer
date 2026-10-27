@@ -261,6 +261,9 @@ namespace {
         int orbWindow = 16;          // v2.6: how far ahead (ticks) an orb may be for that
         int simTick = 0;             // v2.6: tick of the current run
         int firstOrbTick = -1;       // v2.6: first tick the current run touched an orb
+        int lastOrbTick = -1;        // v2.78: last tick the current run was inside an orb
+        bool orbAfterFirst = false;  // v2.78: orb alignment: once your click used an orb, click the later ones too
+        bool laterOrbTouched = false;  // v2.78: the run reached another orb after the one your click used
         int orbUsedTick = -1;        // v2.6: first tick the current run actually used an orb
         bool driftCheck = false;     // v2.4: log how far the real player strays from the prediction
         std::vector<CCPoint>* recordPath = nullptr;  // v2.4: ghost1 positions of the current run
@@ -1410,6 +1413,8 @@ namespace {
         buf.ghostDied = false;
         buf.ghostHitPortal = false;
         buf.firstOrbTick = -1;
+        buf.lastOrbTick = -1;
+        buf.laterOrbTouched = false;
         buf.orbUsedTick = -1;
 
         bool second = dual && buf.ghost2 && p2;
@@ -1749,94 +1754,159 @@ namespace {
     // v2.6 orb alignment: a press made a little before reaching an orb would be wasted
     // (or jump off the ground instead). Find the delay that lands the press inside the
     // orb, like the cube buffer does for jumps. Returns that delay, or 0.
-    int alignOrb(PlayLayer* layer, PlayerObject* p1, PlayerObject* p2, bool dual, int horizon, int releaseAfter, int learned, int* landed) {
+    // v2.78 hard orb timings (Orbit): every tick you're inside the orb is tried (not just the
+    // first 6), the orbs after this one are clicked in the prediction too (with a few
+    // timings each), and of the timings that are fully safe the middle one is picked, so a
+    // real run a hair off still makes it; with robust saves it must also survive starting
+    // half a tick ahead / behind.
+    int alignOrb(PlayLayer* layer, PlayerObject* p1, PlayerObject* p2, bool dual, int horizon, int releaseAfter, int learned, int maxDelay,
+        int* landed) {
         int window = st(std::clamp(buf.orbWindow, 1, 64));
         int found = 0;
         SimEnd end;
         buf.orbClick = false;  // the press being tested is the orb click
         buf.orbWasTiming = false;
-
-        // v2.26: the orb timing that worked at this spot on earlier runs is tried first.
-        if (learned > 0 && learned <= window) {
-            int ret = simulate(layer, p1, p2, dual, learned, true, horizon, releaseAfter, horizon, &end);
-            if (buf.orbUsedTick >= 0 && ret >= horizon) {
-                *landed = ret;
+        buf.orbAfterFirst = true;
+        struct Reset {
+            ~Reset() {
                 buf.orbClick = buf.assumeOrbs;
+                buf.orbAfterFirst = false;
+                buf.orbClickDelay = 0;
+                buf.ghostShiftX = 0.f;
+            }
+        } reset;
+
+        // one timing k: your click k ticks from now; later orbs clicked on touch, then 3 / 6 /
+        // 10 ticks into them if that dies. Returns ticks survived and whether your click used an orb.
+        auto tryAt = [&](int k, bool* used) {
+            int best = -1;
+            *used = false;
+            for (int late : { 0, 3, 6, 10 }) {
+                buf.orbClickDelay = st(late);
+                int ret = simulate(layer, p1, p2, dual, k, true, horizon, releaseAfter, horizon, &end);
+                buf.orbClickDelay = 0;
+                if (late == 0) {
+                    *used = buf.orbUsedTick >= 0;
+                }
+                best = std::max(best, ret);
+                if (ret >= horizon || buf.orbUsedTick < 0 || !buf.laterOrbTouched || !buf.orbTiming || end == SimEnd::StopSearch) {
+                    break;
+                }
+            }
+            return best;
+        };
+        auto robustAt = [&](int k) {
+            if (!buf.robustSaves) {
+                return true;
+            }
+            float shift = std::max(0.3f, 0.5f * (311.58f / 240.f) * (std::abs(p1->m_playerSpeed) / 0.9f));
+            for (float off : { shift, -shift }) {
+                buf.ghostShiftX = off;
+                bool used;
+                int ret = tryAt(k, &used);
+                buf.ghostShiftX = 0.f;
+                if (ret < horizon || !used) {
+                    return false;
+                }
+            }
+            return true;
+        };
+
+        // the orb timing that worked at this spot on earlier runs is tried first
+        if (learned > 0 && learned <= maxDelay) {
+            bool used;
+            int ret = tryAt(learned, &used);
+            if (used && ret >= horizon) {
+                *landed = ret;
                 return learned;
             }
         }
 
-        // 1. Cheap probe: without pressing, does the ghost reach an orb soon?
+        // 1. Cheap probe: without pressing, does the ghost reach an orb soon, and how long
+        //    does it stay inside it?
         buf.skipPress = true;
-        simulate(layer, p1, p2, dual, 0, true, window + 2, -1, window + 2, &end);
+        buf.orbAfterFirst = false;
+        int probeLen = std::min(maxDelay, std::max(window, st(40))) + 2;
+        simulate(layer, p1, p2, dual, 0, true, probeLen, -1, probeLen, &end);
         buf.skipPress = false;
+        buf.orbAfterFirst = true;
         int touch = buf.firstOrbTick;
+        int leave = buf.lastOrbTick;
         std::string trace;  // v2.42: what was tried, for the explain log
+        if (touch < 0 || touch > window) {
+            return 0;
+        }
 
-        if (touch >= 0 && touch <= window) {
-            // 2. Pressing now already uses an orb (e.g. held into it).
-            int now = simulate(layer, p1, p2, dual, 0, true, horizon, releaseAfter, horizon, &end);
-            bool nowUses = buf.orbUsedTick >= 0;
-            if (nowUses && now < horizon && buf.orbTiming) {
-                // v2.26: ...but crashes. Where in the orb you click changes where it sends
-                // you, so try clicking 1 to 6 ticks later, still inside the orb; the run
-                // that lives longest (and clearly longer than now) wins.
-                int bestRet = -1;
-                for (int k = 1; k <= std::min(window, st(6)); ++k) {
-                    int ret = simulate(layer, p1, p2, dual, k, true, horizon, releaseAfter, horizon, &end);
-                    if (buf.explain) {
-                        trace += fmt::format(" +{}:{}{}", k, ret, buf.orbUsedTick >= 0 ? "o" : "-");
-                    }
-                    if (end == SimEnd::StopSearch) {
-                        break;
-                    }
-                    if (buf.orbUsedTick < 0 || ret < std::min(horizon, now + st(12)) || ret <= bestRet) {
-                        continue;
-                    }
-                    bestRet = ret;
-                    found = k;
-                    *landed = ret;
-                    buf.orbWasTiming = true;
-                    if (ret >= horizon) {
-                        break;
-                    }
-                }
+        bool nowUsed;
+        int now = tryAt(0, &nowUsed);
+        if (nowUsed && (now >= horizon || !buf.orbTiming)) {
+            return 0;  // pressing now uses the orb and is safe: nothing to fix
+        }
+        // every tick from just before the orb to the last tick inside it
+        int from = nowUsed ? 1 : std::max(1, touch - 1);
+        int to = std::min(maxDelay, std::max(leave, touch + st(6)));
+        int safeStart = -1, safeEnd = -1;
+        int bestRet = -1, bestK = 0;
+        for (int k = from; k <= to; ++k) {
+            if (clickMs() > buf.budgetMs) {
+                trace += " (budget)";
+                break;
             }
-            else if (!nowUses) {
-                // 3. Every delay while you're inside the orb whose press really uses it and
-                //    doesn't crash sooner than missing it would. v2.16: the one that lives
-                //    longest wins (earliest on a tie), instead of simply the first that hits
-                //    the orb: where in the orb you click changes where the orb sends you.
-                int bestRet = -1;
-                for (int k = std::max(1, touch - 1); k <= std::min(window, touch + st(6)); ++k) {
-                    int ret = simulate(layer, p1, p2, dual, k, true, horizon, releaseAfter, horizon, &end);
-                    if (buf.explain) {
-                        trace += fmt::format(" +{}:{}{}", k, ret, buf.orbUsedTick >= 0 ? "o" : "-");
-                    }
-                    if (end == SimEnd::StopSearch) {
-                        break;
-                    }
-                    if (buf.orbUsedTick < 0 || ret < std::min(now, horizon)) {
-                        continue;
-                    }
-                    if (ret > bestRet) {
-                        bestRet = ret;
-                        found = k;
-                        *landed = ret;
-                    }
-                    if (ret >= horizon) {
-                        break;  // fully safe: a later tick can't beat it
-                    }
-                }
-            }
-            // v2.42 explain: "+k:ret o" = press k ticks later lives ret ticks and used the orb
-            // ("-" = missed it); a pick needs to use the orb and live at least as long as now.
+            bool used;
+            int ret = tryAt(k, &used);
             if (buf.explain) {
-                say("orb: touch at t{}, press now {} -> {}t |{} => {}", touch, nowUses ? "uses it" : "misses it", now,
-                    trace.empty() ? " (nothing to try)" : trace, found > 0 ? fmt::format("+{}t", found) : std::string("no pick"));
+                trace += fmt::format(" +{}:{}{}", k, ret, used ? "o" : "-");
+            }
+            if (end == SimEnd::StopSearch) {
+                break;
+            }
+            if (!used) {
+                if (safeStart >= 0) {
+                    break;  // past the orb after a safe stretch
+                }
+                continue;
+            }
+            if (ret >= horizon) {
+                if (safeStart < 0) {
+                    safeStart = k;
+                }
+                safeEnd = k;
+            }
+            else if (safeStart >= 0) {
+                break;  // the first safe stretch is over
+            }
+            if (ret > bestRet) {
+                bestRet = ret;
+                bestK = k;
             }
         }
-        buf.orbClick = buf.assumeOrbs;
+        if (safeStart >= 0) {
+            // the middle of the safe stretch, checked from there outwards for robustness
+            int mid = (safeStart + safeEnd) / 2;
+            found = mid;
+            for (int off = 0; off <= safeEnd - safeStart; ++off) {
+                int k = off % 2 == 0 ? mid + off / 2 : mid - (off + 1) / 2;
+                if (k < safeStart || k > safeEnd) {
+                    continue;
+                }
+                if (clickMs() > buf.budgetMs * 1.5 || robustAt(k)) {
+                    found = k;
+                    break;
+                }
+            }
+            *landed = horizon;
+        }
+        else if (bestK > 0 && bestRet >= std::min(horizon, std::max(now, 0) + st(12))) {
+            found = bestK;  // nothing fully safe: the clearly longest-living timing
+            *landed = bestRet;
+        }
+        buf.orbWasTiming = found > 0 && nowUsed;
+        // v2.42 explain: "+k:ret o" = press k ticks later lives ret ticks and used the orb
+        if (buf.explain) {
+            say("orb: inside t{}-t{}, press now {} -> {}t |{} => {}{}", touch, leave, nowUsed ? "uses it" : "misses it", now,
+                trace.empty() ? " (nothing to try)" : trace, found > 0 ? fmt::format("+{}t", found) : std::string("no pick"),
+                safeStart >= 0 ? fmt::format(" (safe +{}..+{}t)", safeStart, safeEnd) : std::string());
+        }
         return found;
     }
 
@@ -2884,7 +2954,7 @@ namespace {
         }
         if (down && !anyWave && !anyShip && buf.orbAlign && buf.smart && (!grounded || buf.orbAlignGround)) {
             int orbLanded = 0;
-            int k = memorySaysSkip(sliceOf(p1)) ? 0 : alignOrb(layer, p1, p2, dual, horizon, releaseAfter, memoryDelay(sliceOf(p1)), &orbLanded);
+            int k = memorySaysSkip(sliceOf(p1)) ? 0 : alignOrb(layer, p1, p2, dual, horizon, releaseAfter, memoryDelay(sliceOf(p1)), maxDelay, &orbLanded);
             if (k > 0 && trainInstead(layer, k, down, "orb")) {
                 decided(layer, p1, p2, dual, 0, down, horizon, releaseAfter);
                 buf.appliedInput = down;
@@ -3702,7 +3772,7 @@ $on_mod(Loaded) {
     if (Loader::get()->isModLoaded("square3ang.cbfextrapolate")) {
         say("CBF Extrapolate detected: visual only, predictions unaffected");
     }
-    say("v2.77 loaded. F6 cycles: 0.5f -> 1f -> 2f -> 4f -> 6f -> 8f -> custom -> off");
+    say("v2.78 loaded. F6 cycles: 0.5f -> 1f -> 2f -> 4f -> 6f -> 8f -> custom -> off");
 }
 
 class $modify(BufPlayLayer, PlayLayer) {
@@ -4396,13 +4466,18 @@ class $modify(BufBaseGameLayer, GJBaseGameLayer) {
             if (buf.firstOrbTick < 0) {
                 buf.firstOrbTick = buf.simTick;
             }
+            buf.lastOrbTick = buf.simTick;
+            if (buf.orbUsedTick >= 0 && !buf.orbsUsed.contains(ring)) {
+                buf.laterOrbTouched = true;
+            }
         }
         GJBaseGameLayer::playerTouchedRing(player, ring);
 
         // v2.2 calculation mode: assume you click every orb you touch, on time. Without
         // this the ghost (which only has the one click being tested) misses the next orb in a
         // chain, falls, and the mod thinks a perfectly good click is a death.
-        if (buf.simulating && buf.orbClick) {
+        bool autoOrb = buf.orbClick || (buf.orbAfterFirst && buf.orbUsedTick >= 0 && !buf.orbsUsed.contains(ring));
+        if (buf.simulating && autoOrb) {
             bool first = player == buf.ghost1;
             bool& held = first ? buf.held1 : buf.held2;
             bool& autoClick = first ? buf.auto1 : buf.auto2;
