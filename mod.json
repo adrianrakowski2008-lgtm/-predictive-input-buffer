@@ -3,7 +3,7 @@
 	"gd": {
 		"win": "2.2081"
 	},
-	"version": "v2.79.0",
+	"version": "v2.80.0",
 	"id": "basu.input-buffer",
 	"name": "Click Before Frames",
 	"developer": "BASU",
@@ -356,6 +356,22 @@
 			"name": "Auto time budget",
 			"description": "While the game is already dropping frames (a frame took over twice as long as it should, and over 20 ms), clicks get at most 4 ms of prediction time so it doesn't get worse. Otherwise the time budget setting is used as it is.",
 			"default": true
+		},
+		"tps": {
+			"type": "int",
+			"name": "Physics TPS",
+			"description": "Physics steps per second in levels. 240 is the normal game. Higher values change the physics, so runs at anything but 240 aren't legit completions. The buffer's windows scale with it automatically. Also a slider in the in-game menu.",
+			"default": 240,
+			"min": 240,
+			"max": 1000,
+			"control": {
+				"slider": true,
+				"slider-step": 10,
+				"input": true,
+				"arrows": true,
+				"arrow-step": 10,
+				"big-arrows": false
+			}
 		},
 		"menu-theme": {
 			"type": "string",

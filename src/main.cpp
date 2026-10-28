@@ -29,6 +29,7 @@
 #include <Geode/ui/Popup.hpp>
 #include <map>
 #include <Geode/modify/PlayerObject.hpp>
+#include <Geode/modify/RingObject.hpp>
 #include <Windows.h>
 #include <algorithm>
 #include <chrono>
@@ -42,6 +43,7 @@
 #include <filesystem>
 #include <functional>
 #include <fstream>
+#include <sstream>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -211,6 +213,9 @@ namespace {
         int autoClickAge = 0;        // v2.79: ticks since the auto click
         int spamStreak = 3;          // v2.79: fast inputs in a row that count as spam (setting)
         bool portalPredict = true;   // v2.79: ghosts switch mode at mode portals instead of stopping
+        bool ghostSwitched = false;  // v2.79: the ghost changed mode through a portal in this run
+        int tps = 240;               // v2.79: physics steps per second (setting)
+        bool haveStartRects = false; // v2.79: realRect1/2 hold where you are as this prediction starts (portal check)
         int spamGap = 16;            // v2.5.2: inputs closer than this (ticks) count toward wave spam
         bool waveMargin = true;      // v2.10: center wave saves in the safe window (1 tick of room)
         bool waveV46 = false;        // v2.7: use the old v4.6 wave rules instead of the cube-style ones
@@ -491,12 +496,6 @@ namespace {
         // v2.35 low latency mode: for players who feel the buffer as input lag. Short searches
         // (no frame hitches), at most 1 frame of delay, no extra "margin" ticks, and clicks
         // made while a delay is waiting aren't shifted (see intercept).
-        buf.lowLatency = mod->getSettingValue<bool>("low-latency");
-        if (buf.lowLatency) {
-            buf.budgetMs = std::min(buf.budgetMs, 3.0);
-            buf.robustSaves = false;
-            buf.waveMargin = false;
-        }
         buf.predictMovers = mod->getSettingValue<bool>("predict-moving-objects");
         buf.shipMaxDelay = static_cast<int>(mod->getSettingValue<int64_t>("ship-max-delay"));
         buf.shipSpamGap = static_cast<int>(mod->getSettingValue<int64_t>("ship-spam-gap"));
@@ -506,9 +505,17 @@ namespace {
         buf.autoClick = mod->getSettingValue<bool>("auto-click");
         buf.spamStreak = std::clamp(static_cast<int>(mod->getSettingValue<int64_t>("wave-spam-streak")), 2, 6);
         buf.portalPredict = mod->getSettingValue<bool>("predict-through-portals");
+        buf.tps = std::clamp(static_cast<int>(mod->getSettingValue<int64_t>("tps")), 240, 1000);
         buf.waveV46 = mod->getSettingValue<bool>("wave-v46");
         buf.waveMargin = mod->getSettingValue<bool>("wave-safety-margin");
         buf.orbWindow = static_cast<int>(mod->getSettingValue<int64_t>("orb-align-ticks"));
+        // v2.79: read last, so its overrides stick (the wave margin used to be read again after it)
+        buf.lowLatency = mod->getSettingValue<bool>("low-latency");
+        if (buf.lowLatency) {
+            buf.budgetMs = std::min(buf.budgetMs, 3.0);
+            buf.robustSaves = false;
+            buf.waveMargin = false;
+        }
         // v2.71 performance mode: for PCs that drop frames on clicks. Shorter searches, no
         // extra robustness runs, orbs clicked only the normal way (no late-click retries), and
         // the debug runs (drift check, live path view) off.
@@ -568,7 +575,9 @@ namespace {
         // checkpoint buttons); always shown in normal mode while the buffer is on.
         auto* layer = GameManager::get()->m_playLayer;
         buf.watermark->setVisible(buf.enabled && !(layer && layer->m_isPracticeMode));
-        buf.watermark->setString(fmt::format("Click Before Frames  |  {}", stageText()).c_str());
+        // v2.79: a custom TPS is always shown
+        auto tpsText = buf.tps != 240 ? fmt::format("  |  {} TPS", buf.tps) : std::string();
+        buf.watermark->setString(fmt::format("Click Before Frames  |  {}{}", stageText(), tpsText).c_str());
     }
 
     void refreshAutoTag() {
@@ -1144,6 +1153,7 @@ namespace {
         uint32_t bad = 0;       // saves here followed by a death
         uint32_t deaths = 0;    // deaths after any decision here
         uint32_t delaySum = 0;  // sum of the delays of the saves that worked
+        uint32_t last = 0;      // v2.79: the delay of the last save that worked here (240/s), 0 = none
     };
 
     std::unordered_map<int, Spot> memory;
@@ -1197,7 +1207,7 @@ namespace {
         std::filesystem::create_directories(memoryFile().parent_path(), ec);
         std::ofstream out(memoryFile(), std::ios::trunc);
         for (auto const& [slice, spot] : memory) {
-            out << slice << ' ' << spot.ok << ' ' << spot.bad << ' ' << spot.deaths << ' ' << spot.delaySum << '\n';
+            out << slice << ' ' << spot.ok << ' ' << spot.bad << ' ' << spot.deaths << ' ' << spot.delaySum << ' ' << spot.last << '\n';
         }
         memoryDirty = false;
     }
@@ -1225,9 +1235,16 @@ namespace {
             memoryKey = "local_" + name;
         }
         std::ifstream in(memoryFile());
-        int slice;
-        Spot spot;
-        while (in >> slice >> spot.ok >> spot.bad >> spot.deaths >> spot.delaySum) {
+        // v2.79: lines may have a 6th number (last working delay); older files have 5
+        std::string line;
+        while (std::getline(in, line)) {
+            std::istringstream fields(line);
+            int slice;
+            Spot spot;
+            if (!(fields >> slice >> spot.ok >> spot.bad >> spot.deaths >> spot.delaySum)) {
+                continue;
+            }
+            fields >> spot.last;
             memory[slice] = spot;
         }
         // v2.75: memory fades. Opened again more than 12 hours later, everything learned counts
@@ -1241,6 +1258,9 @@ namespace {
                 uint32_t ok = s.ok * 3 / 4;
                 s.delaySum = s.ok > 0 ? static_cast<uint32_t>(static_cast<uint64_t>(s.delaySum) * ok / s.ok) : 0;
                 s.ok = ok;
+                if (ok == 0) {
+                    s.last = 0;  // v2.79: nothing that worked is left to reuse
+                }
                 s.bad = s.bad * 3 / 4;
                 s.deaths = s.deaths * 3 / 4;
                 it = (s.ok | s.bad | s.deaths) == 0 ? memory.erase(it) : std::next(it);
@@ -1267,8 +1287,15 @@ namespace {
         pending.active = false;
         if (pending.delay > 0) {
             auto& spot = memory[pending.slice];
+            auto delay = static_cast<uint32_t>(std::lround(pending.delay / stepScale()));  // stored at 240/s
             ++spot.ok;
-            spot.delaySum += static_cast<uint32_t>(std::lround(pending.delay / stepScale()));  // stored at 240/s
+            spot.delaySum += delay;
+            // v2.79: the exact delay that just worked is reused next time, and each save that works
+            // takes back one old failure here, so a spot you've started making stops being skipped
+            spot.last = delay;
+            if (spot.bad > 0) {
+                --spot.bad;
+            }
             memoryChanged();
         }
     }
@@ -1334,12 +1361,21 @@ namespace {
         return spot.bad >= 2 && spot.bad > spot.ok;
     }
 
-    // The delay that has worked here before (average of the saves you survived), or 0.
+    // The delay that has worked here before, or 0.
+    // v2.79: the last delay that worked (this spot first, then its neighbours) instead of the
+    // average of all of them: +4 and +12 both working averaged to +8, which may never have
+    // worked (narrow orb timings and wave turns). It's still checked by a prediction before use.
     int memoryDelay(int slice) {
         if (!buf.learn) {
             return 0;
         }
-        auto spot = spotAround(slice);
+        for (int sl : { slice, slice - 1, slice + 1 }) {
+            auto it = memory.find(sl);
+            if (it != memory.end() && it->second.last > 0) {
+                return st(static_cast<int>(it->second.last));
+            }
+        }
+        auto spot = spotAround(slice);  // older lines: no last delay yet, the average
         if (spot.ok < 2) {
             return 0;
         }
@@ -1407,6 +1443,7 @@ namespace {
         if (now) {
             return;
         }
+        buf.ghostSwitched = true;
         if (ghost->m_isShip) ghost->toggleFlyMode(false, true);
         if (ghost->m_isBall) ghost->toggleRollMode(false, true);
         if (ghost->m_isBird) ghost->toggleBirdMode(false, true);
@@ -1469,10 +1506,12 @@ namespace {
         bool second = dual && buf.ghost2 && p2;
         buf.haveRealRect = buf.ignoreTouching;
         buf.harmless.clear();
-        if (buf.haveRealRect) {
-            buf.realRect1 = p1->getObjectRect();
-            buf.realRect2 = second ? p2->getObjectRect() : buf.realRect1;
-        }
+        buf.ghostSwitched = false;
+        // v2.79: always known, so mode portals you're still inside are skipped (see
+        // collisionCheckObjects)
+        buf.haveStartRects = true;
+        buf.realRect1 = p1->getObjectRect();
+        buf.realRect2 = second ? p2->getObjectRect() : buf.realRect1;
         copyState(buf.ghost1, p1);
         if (second) {
             copyState(buf.ghost2, p2);
@@ -1606,7 +1645,9 @@ namespace {
             if (survived >= stopAt) {
                 break;
             }
-            if (flying && !ufoRun) {
+            // v2.79: after a portal changed the ghost's mode, only surviving the look-ahead counts
+            // (the cube's "landed = safe" rule doesn't fit the new mode)
+            if ((flying && !ufoRun) || buf.ghostSwitched) {
                 continue;
             }
 
@@ -1657,6 +1698,14 @@ namespace {
         if (buf.ghost2) {
             buf.ghost2->stopAllActions();
         }
+        // v2.79: a ghost that used an orb or dashed started its particles (orb burst, dash
+        // fire) right where the orb is, before you got there
+        if (buf.firstOrbTick >= 0) {
+            buf.ghost1->stopParticles();
+            if (buf.ghost2) {
+                buf.ghost2->stopParticles();
+            }
+        }
         buf.simulating = false;
         return safe ? horizon : survived;
     }
@@ -1664,12 +1713,42 @@ namespace {
     // v2.4: simulate() with the orb setting; if that run touched an orb and didn't make
     // it, also try the other choice (click it / skip it) and keep whichever lives longer,
     // like a player who only clicks the orb when they need it.
+    // v2.70: when the current click started being processed.
+    // v2.79: the whole click shares its time: each search used to get the full budget on its
+    // own, on top of the base run, memory try and orb checks before it, so a wave save on
+    // GRIEF could take 2-3 frames at 240 fps. Orb retries stop once the click is over time.
+    std::chrono::steady_clock::time_point clickStart;
+    bool clickTimed = false;
+
+    double clickMs() {
+        return clickTimed ? std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - clickStart).count() : 0.0;
+    }
+
+    bool clickOverTime() {
+        return clickMs() > buf.budgetMs * 1.25;
+    }
+
+    // what's left of the click's time for a search
+    double searchBudget() {
+        return clickTimed ? buf.budgetMs - clickMs() : buf.budgetMs;
+    }
+
+    struct ClickTimer {
+        ClickTimer() {
+            clickStart = std::chrono::steady_clock::now();
+            clickTimed = true;
+        }
+        ~ClickTimer() {
+            clickTimed = false;
+        }
+    };
+
     int simulateOrbs(PlayLayer* layer, PlayerObject* p1, PlayerObject* p2, bool dual, int delay, bool down, int horizon, int releaseAfter,
         int stopAt, SimEnd* end) {
         buf.orbClick = buf.assumeOrbs;
         buf.touchedOrb = false;
         int first = simulate(layer, p1, p2, dual, delay, down, horizon, releaseAfter, stopAt, end);
-        if (!buf.tryBothOrbs || !buf.smart || !buf.touchedOrb || first >= stopAt) {
+        if (!buf.tryBothOrbs || !buf.smart || !buf.touchedOrb || first >= stopAt || clickOverTime()) {
             return first;
         }
         SimEnd firstEnd = *end;
@@ -1682,7 +1761,7 @@ namespace {
         int best = std::max(first, second);
         // v2.26: some orbs only work when clicked at a specific moment inside them (levels
         // like Orbit). The ghost's orb clicks are also tried 3 and 6 ticks into the orb.
-        if (buf.orbTiming && best < stopAt) {
+        if (buf.orbTiming && best < stopAt && !clickOverTime()) {
             for (int late : { 3, 6 }) {
                 buf.orbClick = true;
                 buf.orbClickDelay = st(late);
@@ -1691,7 +1770,7 @@ namespace {
                 buf.orbClickDelay = 0;
                 buf.orbClick = buf.assumeOrbs;
                 best = std::max(best, ret);
-                if (best >= stopAt) {
+                if (best >= stopAt || clickOverTime()) {
                     break;
                 }
             }
@@ -1775,15 +1854,8 @@ namespace {
     }
 
     // After every buffer decision: drift check + path view for the input the game gets.
-    // v2.70: when the current click started being processed; the extras after the search
-    // (robust check, drift check, path view) are skipped once the click has used up its
-    // time, so one click can't stall a frame for long. The search itself keeps its budget.
-    std::chrono::steady_clock::time_point clickStart;
-
-    double clickMs() {
-        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - clickStart).count();
-    }
-
+    // v2.70: the extras after the search (robust check, drift check, path view) are skipped
+    // once the click has used up its time, so one click can't stall a frame for long.
     void decided(PlayLayer* layer, PlayerObject* p1, PlayerObject* p2, bool dual, int delay, bool down, int horizon, int releaseAfter) {
         memoryNote(p1, delay);
         if (clickMs() > buf.budgetMs * 1.5) {
@@ -1896,8 +1968,12 @@ namespace {
         int to = std::min(maxDelay, std::max(leave, touch + st(6)));
         int safeStart = -1, safeEnd = -1;
         int bestRet = -1, bestK = 0;
+        int bestAt = -1;  // v2.79: when the best timing crashes, counted from now (k + ret)
+        // v2.79: orb clicks get more time (1.75x the budget for the scan, 2x with the robustness
+        // check): at 240 fps one frame (~4 ms) only covered about 6 ticks of ORBIT's 20-tick orbs
+        double orbBudget = buf.budgetMs * 1.75;
         for (int k = from; k <= to; ++k) {
-            if (clickMs() > buf.budgetMs) {
+            if (clickMs() > orbBudget) {
                 trace += " (budget)";
                 break;
             }
@@ -1924,7 +2000,12 @@ namespace {
             else if (safeStart >= 0) {
                 break;  // the first safe stretch is over
             }
-            if (ret > bestRet) {
+            // v2.79: timings are compared by when they crash counted from now, not from each
+            // click: on ORBIT, clicking 9 ticks later lived 59 ticks after its click (crash at
+            // t68) vs 50 for clicking now (t50), 18 ticks later, but 59 < 50 + 12 so it was
+            // never picked
+            if (k + ret > bestAt) {
+                bestAt = k + ret;
                 bestRet = ret;
                 bestK = k;
             }
@@ -1938,15 +2019,15 @@ namespace {
                 if (k < safeStart || k > safeEnd) {
                     continue;
                 }
-                if (clickMs() > buf.budgetMs * 1.5 || robustAt(k)) {
+                if (clickMs() > buf.budgetMs * 2.0 || robustAt(k)) {
                     found = k;
                     break;
                 }
             }
             *landed = horizon;
         }
-        else if (bestK > 0 && bestRet >= std::min(horizon, std::max(now, 0) + st(12))) {
-            found = bestK;  // nothing fully safe: the clearly longest-living timing
+        else if (bestK > 0 && bestAt >= std::max(now, 0) + st(12)) {
+            found = bestK;  // nothing fully safe: the timing that crashes clearly latest
             *landed = bestRet;
         }
         buf.orbWasTiming = found > 0 && nowUsed;
@@ -2098,6 +2179,7 @@ namespace {
         if (budget < 0.0) {
             budget = buf.budgetMs;
         }
+        budget = std::min(budget, searchBudget());
         using clock = std::chrono::steady_clock;
         auto start = clock::now();
         int target = needFull ? horizon : std::min(horizon, base + st(12));
@@ -2136,7 +2218,7 @@ namespace {
     int searchTwoPass(int horizon, int maxDelay, int base, int* landed, std::function<int(int, int, SimEnd*)> const& score,
         bool needFull = false) {
         quickScore = true;
-        int k = searchSmallest(horizon, maxDelay, base, landed, score, buf.budgetMs * 0.5, true, needFull);
+        int k = searchSmallest(horizon, maxDelay, base, landed, score, searchBudget() * 0.5, true, needFull);
         quickScore = false;
         if (k > 0) {
             return k;
@@ -2221,6 +2303,7 @@ namespace {
         marginUsed = false;
         using clock = std::chrono::steady_clock;
         auto start = clock::now();
+        double budget = searchBudget();
         int target = std::min(horizon, base + st(12));
         dbgBestK = 0;
         dbgBestRet = -1;
@@ -2250,7 +2333,7 @@ namespace {
                 }
                 return k;
             }
-            if (std::chrono::duration<double, std::milli>(clock::now() - start).count() > buf.budgetMs) {
+            if (std::chrono::duration<double, std::milli>(clock::now() - start).count() > budget) {
                 say("prediction budget hit at +{} ticks", k);
                 return 0;
             }
@@ -2263,8 +2346,9 @@ namespace {
         int releaseAfter, int base, int* landed, bool needFull = false) {
         using clock = std::chrono::steady_clock;
         auto start = clock::now();
+        double budget = searchBudget();
         auto overBudget = [&] {
-            return std::chrono::duration<double, std::milli>(clock::now() - start).count() > buf.budgetMs;
+            return std::chrono::duration<double, std::milli>(clock::now() - start).count() > budget;
         };
 
         int target = needFull ? horizon : std::min(horizon, base + st(12));
@@ -2790,7 +2874,7 @@ namespace {
     }
 
     bool intercept(GJBaseGameLayer* self, bool down, bool isPlayer1) {
-        clickStart = std::chrono::steady_clock::now();
+        ClickTimer timer;
         clickBudget();
         auto* layer = GameManager::get()->m_playLayer;
         if (!layer) {
@@ -3105,6 +3189,9 @@ namespace {
                 int moreMax = (cubeStyleWave || shipInput) ? std::min(maxDelay, st(4)) : maxDelay;
                 for (int k = 1; k <= moreMax; ++k) {
                     SimEnd e;
+                    if (clickOverTime()) {
+                        break;
+                    }
                     int ret = simulateOrbs(layer, p1, p2, dual, k, down, horizon, hold, horizon, &e);
                     if (e == SimEnd::StopSearch) {
                         break;
@@ -3252,7 +3339,7 @@ namespace {
                 return true;
             };
             if (clickMs() < buf.budgetMs && !robust(saved)) {
-                for (int k = saved + 1; k <= std::min(maxDelay, saved + st(3)); ++k) {
+                for (int k = saved + 1; k <= std::min(maxDelay, saved + st(3)) && !clickOverTime(); ++k) {
                     SimEnd e;
                     int ret = scoreAt(k, target, &e);
                     if (ret >= target && robust(k)) {
@@ -3405,10 +3492,11 @@ namespace {
         int window = st(std::clamp(buf.autoWindow, 2, 24));
         buf.sawMover = false;
         buf.skipPress = true;
-        buf.orbClick = buf.assumeOrbs;
+        buf.orbClick = false;  // no clicks at all in the do-nothing run
         SimEnd end;
         int idle = simulate(layer, p1, p2, dual, 0, true, window, -1, window, &end);
         buf.skipPress = false;
+        buf.orbClick = buf.assumeOrbs;
         if (idle >= window || buf.ghostHitPortal) {
             return;
         }
@@ -3508,6 +3596,7 @@ class BufferMenu : public geode::Popup {
         { "death-heatmap", "Death heatmap" },
         { "save-ding", "Ding on save" },
         { "performance-mode", "Performance mode" },
+        { "auto-click", "Auto-click (practice)" },
         { "explain-inputs", "Explain inputs (debug)" },
     };
 
@@ -3541,6 +3630,10 @@ private:
 
     CCLabelBMFont* m_stage = nullptr;
     CCLabelBMFont* m_status = nullptr;
+    CCLabelBMFont* m_tpsLabel = nullptr;
+
+    static constexpr int TPS_MIN = 240;
+    static constexpr int TPS_MAX = 1000;
     std::vector<CCLabelBMFont*> m_labels;
 
     static CCSprite* heart(float scale, ccColor3B color) {
@@ -3610,6 +3703,7 @@ private:
             saveProfile();
             refreshHeatmap();
             refreshWatermark();
+            refreshAutoTag();
         }
         else {
             buf.showPath = value;
@@ -3624,6 +3718,16 @@ private:
     void onStage(CCObject* sender) {
         cycleStage(sender->getTag());
         refresh();
+    }
+
+    // v2.79: physics TPS slider (240-1000, steps of 10)
+    void onTps(CCObject* sender) {
+        float value = static_cast<SliderThumb*>(sender)->getValue();
+        int tps = TPS_MIN + static_cast<int>(std::lround(value * (TPS_MAX - TPS_MIN) / 10.f)) * 10;
+        Mod::get()->setSettingValue<int64_t>("tps", tps);
+        readSettings();
+        refreshWatermark();
+        m_tpsLabel->setString(fmt::format("TPS: {}{}", tps, tps == 240 ? " (normal)" : "").c_str());
     }
 
     void onAllSettings(CCObject*) {
@@ -3685,7 +3789,7 @@ private:
 
 protected:
     bool init() {
-        if (!Popup::init(380.f, 412.f, "GJ_square04.png")) {
+        if (!Popup::init(380.f, MENU_HEIGHT, "GJ_square04.png")) {
             return false;
         }
         m_bgSprite->setColor(m_t.bg);
@@ -3756,6 +3860,16 @@ protected:
             m_labels.push_back(label);
         }
 
+        // v2.79: physics TPS slider
+        int tps = buf.tps;
+        m_tpsLabel = CCLabelBMFont::create(fmt::format("TPS: {}{}", tps, tps == 240 ? " (normal)" : "").c_str(), "bigFont.fnt");
+        m_tpsLabel->setScale(0.4f);
+        m_tpsLabel->setColor(m_t.soft);
+        m_mainLayer->addChildAtPosition(m_tpsLabel, Anchor::Bottom, { -120.f, 112.f });
+        auto* slider = Slider::create(this, menu_selector(BufferMenu::onTps), 0.6f);
+        slider->setValue(static_cast<float>(tps - TPS_MIN) / (TPS_MAX - TPS_MIN));
+        m_mainLayer->addChildAtPosition(slider, Anchor::Bottom, { 45.f, 112.f });
+
         // status + shortcuts
         m_status = CCLabelBMFont::create("", "chatFont.fnt");
         m_status->setScale(0.55f);
@@ -3790,9 +3904,12 @@ public:
         Popup::show();
         m_mainLayer->stopAllActions();
         m_mainLayer->setScale(0.1f);
-        m_mainLayer->runAction(CCEaseElasticOut::create(CCScaleTo::create(0.5f, MENU_SCALE), 0.6f));
+        // v2.79: smaller when the taller menu wouldn't fit on screen at 78%
+        float fit = (CCDirector::get()->getWinSize().height - 12.f) / MENU_HEIGHT;
+        m_mainLayer->runAction(CCEaseElasticOut::create(CCScaleTo::create(0.5f, std::min(MENU_SCALE, fit)), 0.6f));
     }
 
+    static constexpr float MENU_HEIGHT = 444.f;  // v2.79: was 412, the TPS slider sits above the presets
     static constexpr float MENU_SCALE = 0.78f;
 
     static BufferMenu* create() {
@@ -3890,7 +4007,7 @@ $on_mod(Loaded) {
     if (Loader::get()->isModLoaded("square3ang.cbfextrapolate")) {
         say("CBF Extrapolate detected: visual only, predictions unaffected");
     }
-    say("v2.79 loaded. The stage key cycles: 0.5f -> 1f -> 2f -> 4f -> 6f -> 8f -> custom -> off");
+    say("v2.80 loaded. The stage key cycles: 0.5f -> 1f -> 2f -> 4f -> 6f -> 8f -> custom -> off");
 }
 
 class $modify(BufPlayLayer, PlayLayer) {
@@ -4153,6 +4270,14 @@ class $modify(BufPlayLayer, PlayLayer) {
         }
         PlayLayer::playEndAnimationToPos(position);
     }
+
+    // v2.79: the level's own circle effect (orb / pad hits) is never spawned by a ghost
+    void spawnCircle() {
+        if (buf.simulating) {
+            return;
+        }
+        PlayLayer::spawnCircle();
+    }
 };
 
 class $modify(BufEditorLayer, LevelEditorLayer) {
@@ -4187,6 +4312,14 @@ class $modify(BufEffectGameObject, EffectGameObject) {
         }
         EffectGameObject::triggerObject(layer, uniqueID, remapKeys);
     }
+
+    // v2.79: visual only, never from a ghost
+    void playTriggerEffect() {
+        if (buf.simulating) {
+            return;
+        }
+        EffectGameObject::playTriggerEffect();
+    }
 };
 
 class $modify(BufGameObject, GameObject) {
@@ -4199,6 +4332,45 @@ class $modify(BufGameObject, GameObject) {
             return;
         }
         GameObject::playShineEffect();
+    }
+
+    // v2.79: visual only, never from a ghost
+    void playDestroyObjectAnim(GJBaseGameLayer* layer) {
+        if (buf.simulating) {
+            return;
+        }
+        GameObject::playDestroyObjectAnim(layer);
+    }
+};
+
+// v2.79: an orb the ghost uses while trying ticks played its "used" animation on the real
+// level (seen on dash orbs before you reached them). The state is restored afterwards
+// anyway, so ghosts skip the visuals.
+class $modify(BufRingObject, RingObject) {
+    static void onModify(auto& self) {
+        (void)self.setHookPriority("RingObject::powerOnObject", HOOK_PRIORITY);
+        (void)self.setHookPriority("RingObject::spawnCircle", HOOK_PRIORITY);
+    }
+
+    void powerOnObject(int state) {
+        if (buf.simulating) {
+            return;
+        }
+        RingObject::powerOnObject(state);
+    }
+
+    void spawnCircle() {
+        if (buf.simulating) {
+            return;
+        }
+        RingObject::spawnCircle();
+    }
+
+    void triggerActivated(float xPosition) {
+        if (buf.simulating) {
+            return;
+        }
+        RingObject::triggerActivated(xPosition);
     }
 };
 
@@ -4436,7 +4608,50 @@ class $modify(BufKeyboard, CCKeyboardDispatcher) {
     }
 };
 
+// v2.79 custom TPS (from the v2.80 build): above 240 the level is stepped in 1/tps pieces.
+// update() runs once per step and getModifiedDelta() hands the step through unrounded, so
+// each call is exactly one physics step. (Below 240 the game's own step count would need
+// patching, so 240 is the floor.) Runs at anything but 240 aren't legit completions.
+static bool tpsDriving = false;
+static double tpsCarry = 0.0;
+
 class $modify(BufBaseGameLayer, GJBaseGameLayer) {
+    void update(float dt) {
+        int tps = buf.tps;
+        if (tps <= 240 || tpsDriving || !typeinfo_cast<PlayLayer*>(this)) {
+            GJBaseGameLayer::update(dt);
+            return;
+        }
+        double step = 1.0 / tps;
+        tpsCarry += dt;
+        int steps = static_cast<int>(tpsCarry / step);
+        int cap = std::max(1, tps / 15);  // after a lag spike, catch up at most 1/15 s
+        if (steps > cap) {
+            steps = cap;
+            tpsCarry = 0.0;
+        }
+        else {
+            tpsCarry -= steps * step;
+        }
+        tpsDriving = true;
+        for (int i = 0; i < steps; ++i) {
+            GJBaseGameLayer::update(static_cast<float>(step));
+        }
+        tpsDriving = false;
+    }
+
+    double getModifiedDelta(float dt) {
+        if (!tpsDriving) {
+            return GJBaseGameLayer::getModifiedDelta(dt);
+        }
+        m_extraDelta = 0.0;
+        if (m_resumeTimer > 0) {
+            --m_resumeTimer;
+            return 0.0;
+        }
+        return dt;
+    }
+
     static void onModify(auto& self) {
         (void)self.setHookPriority("GJBaseGameLayer::canBeActivatedByPlayer", HOOK_PRIORITY);
         (void)self.setHookPriority("GJBaseGameLayer::handleButton", HOOK_PRIORITY);
@@ -4539,10 +4754,27 @@ class $modify(BufBaseGameLayer, GJBaseGameLayer) {
                 haveRect = true;
             }
             if (ghostRect.intersectsRect(object->getObjectRect())) {
-                if (stop && buf.portalPredict && buf.fullState && (MODE_TYPES & bit)) {
-                    setGhostMode(player, object->m_objectType);
-                }
-                else if (stop) {
+                if (stop) {
+                    // v2.79: a mode portal you're still inside when you click was already taken
+                    // (you're in its mode now). It stopped every prediction at t0, so nothing right
+                    // after a portal was predicted (Amethyst's first pink orb: the click was never
+                    // moved onto the orb). Only portals ahead stop a prediction; teleport orbs
+                    // still do, since they need a click.
+                    if (buf.harmless.contains(object)) {
+                        continue;
+                    }
+                    auto const& r = object->getObjectRect();
+                    if (buf.haveStartRects && buf.simTick <= 1 && object->m_objectType != GameObjectType::TeleportOrb &&
+                        (r.intersectsRect(buf.realRect1) || r.intersectsRect(buf.realRect2))) {
+                        buf.harmless.insert(object);
+                        continue;
+                    }
+                    // v2.79: mode portals ahead are taken by the ghost (once per run)
+                    if (buf.portalPredict && buf.fullState && (MODE_TYPES & bit)) {
+                        setGhostMode(player, object->m_objectType);
+                        buf.harmless.insert(object);
+                        continue;
+                    }
                     buf.ghostHitPortal = true;
                 }
                 else if (size) {
