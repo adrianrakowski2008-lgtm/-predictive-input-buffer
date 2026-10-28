@@ -53,7 +53,6 @@ namespace {
     constexpr float TICK = 0.25f;
     constexpr size_t PANEL_LINES = 8;
     constexpr int SPIDER_LAND = 12;  // v2.15: ticks on a surface after a spider input = safe
-    constexpr int SPAM_STREAK = 3;  // this many fast inputs in a row = wave spam
 
     constexpr uint64_t typeBit(GameObjectType type) {
         return 1ull << static_cast<int>(type);
@@ -82,6 +81,13 @@ namespace {
         typeBit(GameObjectType::UfoPortal) | typeBit(GameObjectType::WavePortal) | typeBit(GameObjectType::RobotPortal) |
         typeBit(GameObjectType::SpiderPortal) | typeBit(GameObjectType::SwingPortal) | typeBit(GameObjectType::DualPortal) |
         typeBit(GameObjectType::SoloPortal) | typeBit(GameObjectType::TeleportPortal) | typeBit(GameObjectType::TeleportOrb);
+
+    // v2.79: with "Predict through portals" these switch the ghost's mode instead of
+    // ending the prediction (dual / solo / teleport still end it).
+    constexpr uint64_t MODE_TYPES =
+        typeBit(GameObjectType::ShipPortal) | typeBit(GameObjectType::CubePortal) | typeBit(GameObjectType::BallPortal) |
+        typeBit(GameObjectType::UfoPortal) | typeBit(GameObjectType::WavePortal) | typeBit(GameObjectType::RobotPortal) |
+        typeBit(GameObjectType::SpiderPortal) | typeBit(GameObjectType::SwingPortal);
 
     // v2.8: size portals are applied to the ghost instead of ending the prediction.
     // (Mirror portals only flip the screen, so the ghost simply ignores them.)
@@ -199,6 +205,12 @@ namespace {
         bool autoRelease = false;    // v2.4: wave auto-release (practice mode only)
         int autoWindow = 6;          // v2.4: hold must die within this many ticks to auto-release
         bool autoReleased = false;   // v2.4: we released for you; your real release is swallowed
+        bool autoClick = false;      // v2.79: click for you when idling dies and a click is fully safe
+        bool autoClicked = false;    // v2.79: we clicked for you; your own click right after is swallowed
+        bool swallowRelease = false; // v2.79: the release of that swallowed click is swallowed too
+        int autoClickAge = 0;        // v2.79: ticks since the auto click
+        int spamStreak = 3;          // v2.79: fast inputs in a row that count as spam (setting)
+        bool portalPredict = true;   // v2.79: ghosts switch mode at mode portals instead of stopping
         int spamGap = 16;            // v2.5.2: inputs closer than this (ticks) count toward wave spam
         bool waveMargin = true;      // v2.10: center wave saves in the safe window (1 tick of room)
         bool waveV46 = false;        // v2.7: use the old v4.6 wave rules instead of the cube-style ones
@@ -339,7 +351,7 @@ namespace {
         if (starts("drift")) return { 255, 240, 150 };
         if (starts("ghost killed") || starts("  hitbox")) return { 255, 120, 120 };
         if (starts("perf")) return { 150, 200, 255 };
-        if (starts("F6") || starts("v2") || starts("path") || starts("Click") || starts("CBF")) return { 255, 215, 90 };
+        if (starts("F6") || starts("stage") || starts("v2") || starts("path") || starts("Click") || starts("CBF")) return { 255, 215, 90 };
         if (starts("pass")) return { 140, 150, 170 };
         if (starts("memory")) return { 255, 150, 220 };
         if (starts("console")) return { 150, 255, 200 };
@@ -491,6 +503,9 @@ namespace {
         buf.cbfSync = mod->getSettingValue<bool>("cbf-sync");
         buf.robotAutoRelease = mod->getSettingValue<bool>("robot-auto-release");
         buf.autoNormalRuns = mod->getSettingValue<bool>("auto-release-normal-runs");
+        buf.autoClick = mod->getSettingValue<bool>("auto-click");
+        buf.spamStreak = std::clamp(static_cast<int>(mod->getSettingValue<int64_t>("wave-spam-streak")), 2, 6);
+        buf.portalPredict = mod->getSettingValue<bool>("predict-through-portals");
         buf.waveV46 = mod->getSettingValue<bool>("wave-v46");
         buf.waveMargin = mod->getSettingValue<bool>("wave-safety-margin");
         buf.orbWindow = static_cast<int>(mod->getSettingValue<int64_t>("orb-align-ticks"));
@@ -561,7 +576,7 @@ namespace {
             return;
         }
         auto* layer = GameManager::get()->m_playLayer;
-        bool on = buf.enabled && buf.autoNormalRuns && (buf.autoRelease || buf.robotAutoRelease || buf.dashAutoRelease) && layer &&
+        bool on = buf.enabled && buf.autoNormalRuns && (buf.autoRelease || buf.robotAutoRelease || buf.dashAutoRelease || buf.autoClick) && layer &&
             !layer->m_isPracticeMode;
         buf.autoTag->setVisible(on);
     }
@@ -645,6 +660,8 @@ namespace {
         buf.injecting = false;
         buf.rapid = 0;
         buf.autoReleased = false;
+        buf.autoClicked = false;
+        buf.swallowRelease = false;
         buf.recordPath = nullptr;
         watched.clear();
         drift.active = false;
@@ -1375,6 +1392,38 @@ namespace {
         ghost->m_collisionLogLeft->removeAllObjects();
         ghost->m_collisionLogRight->removeAllObjects();
         layer->checkCollisions(ghost, dt, false);
+    }
+
+    // v2.79: the ghost goes through a mode portal the way the player would (no effects).
+    // Mode flags are copied from the real player before every run, so nothing leaks.
+    void setGhostMode(PlayerObject* ghost, GameObjectType type) {
+        using T = GameObjectType;
+        bool now = (type == T::ShipPortal && ghost->m_isShip) || (type == T::BallPortal && ghost->m_isBall) ||
+            (type == T::UfoPortal && ghost->m_isBird) || (type == T::WavePortal && ghost->m_isDart) ||
+            (type == T::RobotPortal && ghost->m_isRobot) || (type == T::SpiderPortal && ghost->m_isSpider) ||
+            (type == T::SwingPortal && ghost->m_isSwing) ||
+            (type == T::CubePortal && !ghost->m_isShip && !ghost->m_isBall && !ghost->m_isBird && !ghost->m_isDart &&
+                !ghost->m_isRobot && !ghost->m_isSpider && !ghost->m_isSwing);
+        if (now) {
+            return;
+        }
+        if (ghost->m_isShip) ghost->toggleFlyMode(false, true);
+        if (ghost->m_isBall) ghost->toggleRollMode(false, true);
+        if (ghost->m_isBird) ghost->toggleBirdMode(false, true);
+        if (ghost->m_isDart) ghost->toggleDartMode(false, true);
+        if (ghost->m_isRobot) ghost->toggleRobotMode(false, true);
+        if (ghost->m_isSpider) ghost->toggleSpiderMode(false, true);
+        if (ghost->m_isSwing) ghost->toggleSwingMode(false, true);
+        switch (type) {
+            case T::ShipPortal: ghost->toggleFlyMode(true, true); break;
+            case T::BallPortal: ghost->toggleRollMode(true, true); break;
+            case T::UfoPortal: ghost->toggleBirdMode(true, true); break;
+            case T::WavePortal: ghost->toggleDartMode(true, true); break;
+            case T::RobotPortal: ghost->toggleRobotMode(true, true); break;
+            case T::SpiderPortal: ghost->toggleSpiderMode(true, true); break;
+            case T::SwingPortal: ghost->toggleSwingMode(true, true); break;
+            default: break;
+        }
     }
 
     bool isFlying(PlayerObject* player) {
@@ -2759,6 +2808,17 @@ namespace {
         bool dual = !twoPlayer && layer->m_gameState.m_isDualMode && layer->m_player2;
 
         buf.isPlayer1 = isPlayer1;
+        // v2.79 auto-click: the game already clicked for you, so the click you were about
+        // to make (press and its release) is ignored
+        if (buf.swallowRelease && !down) {
+            buf.swallowRelease = false;
+            return true;
+        }
+        if (buf.autoClicked && down && isPlayer1) {
+            buf.autoClicked = false;
+            buf.swallowRelease = true;
+            return true;
+        }
         buf.realInput = down;
         if (buf.autoReleased) {
             // the game already let go for you: your real release has nothing left to do
@@ -2836,7 +2896,7 @@ namespace {
         bool anyBall = p1->m_isBall || (p2 && p2->m_isBall);
         bool anySwing = p1->m_isSwing || (p2 && p2->m_isSwing);
         if ((anyWave || anyShip || (anyUfo && buf.ufoSmart) || (anyBall && buf.ballSmart) || (anySwing && buf.swingSmart)) &&
-            buf.rapid >= SPAM_STREAK) {
+            buf.rapid >= buf.spamStreak) {
             if (buf.explain) {
                 say("pass {}: spam ({} fast inputs in a row, gap < {}t)", down ? "press" : "release", buf.rapid, spamGap);
             }
@@ -3253,7 +3313,7 @@ namespace {
         applyStage();
         readSettings();
         saveProfile();
-        say("F6 -> {}", stageText());
+        say("stage -> {}", stageText());
         refreshAutoTag();
         refreshWatermark();
         refreshPanel();
@@ -3317,7 +3377,60 @@ namespace {
         say("AUTO release{}: holding dies in {}t, letting go lives {}t", dash ? " (dash)" : (robot ? " (robot)" : ""), hold, release);
     }
 
+    // v2.79 auto-click: while you're not holding, check whether doing nothing crashes within
+    // the auto-release window. If it does and a click right now (held for your usual tap) is
+    // fully safe, click for you; your own click, if it still comes, is swallowed.
+    void tryAutoClick(PlayLayer* layer, PlayerObject* p1) {
+        if (!buf.autoClick || !buf.enabled || buf.autoClicked || buf.swallowRelease || buf.autoReleased || layer->m_isPlatformer) {
+            return;
+        }
+        if (!layer->m_isPracticeMode && !buf.autoNormalRuns) {
+            return;
+        }
+        if (!buf.queue.empty() || buf.realInput || buf.appliedInput || !buf.isPlayer1 || !buf.ghost1 || buf.sinceInput < st(4)) {
+            return;
+        }
+        if (layer->m_level && layer->m_level->m_twoPlayerMode) {
+            return;
+        }
+        bool dual = layer->m_gameState.m_isDualMode && layer->m_player2;
+        auto* p2 = dual ? layer->m_player2 : nullptr;
+        auto skipMode = [](PlayerObject* p) { return p->m_isDart || p->m_isShip || p->m_isDashing; };
+        if (p1->m_isDead || skipMode(p1) || (p2 && skipMode(p2))) {
+            return;
+        }
+        bool robot = p1->m_isRobot || (p2 && p2->m_isRobot);
+        bool flyer = isFlying(p1) || (p2 && isFlying(p2));
+
+        int window = st(std::clamp(buf.autoWindow, 2, 24));
+        buf.sawMover = false;
+        buf.skipPress = true;
+        buf.orbClick = buf.assumeOrbs;
+        SimEnd end;
+        int idle = simulate(layer, p1, p2, dual, 0, true, window, -1, window, &end);
+        buf.skipPress = false;
+        if (idle >= window || buf.ghostHitPortal) {
+            return;
+        }
+        int horizon = st(flyer ? 48 : std::clamp(buf.groundHorizon, 48, 240));
+        int hold = robot ? robotHold.pick(st(20), 50) : holdEstimate();
+        buf.trackMovers = buf.avoidMovers;
+        int click = simulateOrbs(layer, p1, p2, dual, 0, true, horizon, hold, horizon, &end);
+        buf.trackMovers = false;
+        if (click < horizon || (buf.avoidMovers && buf.sawMover)) {
+            return;
+        }
+        buf.autoClicked = true;
+        buf.autoClickAge = 0;
+        sendButton(layer, true);
+        queueInput(hold, false);
+        say("AUTO click{}: doing nothing dies in {}t, clicking (hold {}t) is safe", robot ? " (robot)" : "", idle, hold);
+    }
+
     void deliverPending(PlayLayer* layer, PlayerObject* player) {
+        if (buf.autoClicked && ++buf.autoClickAge > st(24)) {
+            buf.autoClicked = false;  // your click never came: the next one is yours again
+        }
         if (buf.sinceInput <= 998) {
             ++buf.sinceInput;
         }
@@ -3346,6 +3459,7 @@ namespace {
                 sendButton(layer, buf.realInput);
             }
             tryAutoRelease(layer, player);
+            tryAutoClick(layer, player);
             sweepGhostLayer();
             return;
         }
@@ -3406,6 +3520,9 @@ class BufferMenu : public geode::Popup {
 public:
     static Theme currentTheme() {
         auto name = Mod::get()->getSettingValue<std::string>("menu-theme");
+        if (name == "Pink") {
+            return { { 255, 150, 205 }, { 255, 205, 230 }, { 215, 190, 255 }, { 255, 195, 235 }, "GJ_button_02.png" };
+        }
         if (name == "Blue") {
             return { { 120, 180, 255 }, { 205, 228, 255 }, { 170, 210, 255 }, { 170, 205, 255 }, "GJ_button_06.png" };
         }
@@ -3415,7 +3532,8 @@ public:
         if (name == "Dark") {
             return { { 200, 160, 255 }, { 225, 225, 235 }, { 170, 170, 190 }, { 90, 85, 110 }, "GJ_button_04.png" };
         }
-        return { { 255, 150, 205 }, { 255, 205, 230 }, { 215, 190, 255 }, { 255, 195, 235 }, "GJ_button_02.png" };
+        // v2.79: purple, the default
+        return { { 185, 130, 255 }, { 225, 205, 255 }, { 255, 170, 225 }, { 205, 175, 255 }, "GJ_button_02.png" };
     }
 
 private:
@@ -3772,7 +3890,7 @@ $on_mod(Loaded) {
     if (Loader::get()->isModLoaded("square3ang.cbfextrapolate")) {
         say("CBF Extrapolate detected: visual only, predictions unaffected");
     }
-    say("v2.78 loaded. F6 cycles: 0.5f -> 1f -> 2f -> 4f -> 6f -> 8f -> custom -> off");
+    say("v2.79 loaded. The stage key cycles: 0.5f -> 1f -> 2f -> 4f -> 6f -> 8f -> custom -> off");
 }
 
 class $modify(BufPlayLayer, PlayLayer) {
@@ -3815,6 +3933,8 @@ class $modify(BufPlayLayer, PlayLayer) {
         resetPending();
         buf.appliedInput = false;
         buf.autoReleased = false;
+        buf.autoClicked = false;
+        buf.swallowRelease = false;
         buf.rapid = 0;
         forgetPress();
         memoryDeath();
@@ -3919,7 +4039,15 @@ class $modify(BufPlayLayer, PlayLayer) {
             buf.panelLines.push_back(line);
         }
 
-        auto* hint = CCLabelBMFont::create("F6 stage  F7 menu  F8 copy log  F9 console  F10 path  F11 forget", "chatFont.fnt");
+        // v2.79: the hint shows the keys you set
+        auto* mod = Mod::get();
+        auto keyName = [mod](char const* key) {
+            auto name = mod->getSettingValue<std::string>(key);
+            return name.empty() ? std::string("-") : name;
+        };
+        auto hintText = fmt::format("{} stage  {} menu  {} copy log  {} console  {} path  {} forget", keyName("key-stage"),
+            keyName("key-menu"), keyName("key-export"), keyName("key-console"), keyName("key-path"), keyName("key-forget"));
+        auto* hint = CCLabelBMFont::create(hintText.c_str(), "chatFont.fnt");
         hint->setScale(0.45f);
         hint->setColor({ 160, 190, 255 });
         hint->setAnchorPoint({ 0.5f, 0.5f });
@@ -4007,6 +4135,8 @@ class $modify(BufPlayLayer, PlayLayer) {
             buf.pathNode->clear();
         }
         buf.autoReleased = false;
+        buf.autoClicked = false;
+        buf.swallowRelease = false;
         drift.active = false;
         PlayLayer::resetLevel();
     }
@@ -4409,7 +4539,10 @@ class $modify(BufBaseGameLayer, GJBaseGameLayer) {
                 haveRect = true;
             }
             if (ghostRect.intersectsRect(object->getObjectRect())) {
-                if (stop) {
+                if (stop && buf.portalPredict && buf.fullState && (MODE_TYPES & bit)) {
+                    setGhostMode(player, object->m_objectType);
+                }
+                else if (stop) {
                     buf.ghostHitPortal = true;
                 }
                 else if (size) {

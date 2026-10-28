@@ -3,7 +3,7 @@
 	"gd": {
 		"win": "2.2081"
 	},
-	"version": "v2.78.0",
+	"version": "v2.79.0",
 	"id": "basu.input-buffer",
 	"name": "Click Before Frames",
 	"developer": "BASU",
@@ -108,10 +108,18 @@
 		"wave-spam-gap": {
 			"type": "int",
 			"name": "Wave spam: max gap (ticks)",
-			"description": "Presses/releases closer together than this count as spam. After 3 in a row, wave inputs go straight to the game until you pause. 16 ticks = 4 frames at 60fps (about 7 clicks/sec). Raise it if spam still gets buffered, lower it if tight wave parts stop being buffered.",
+			"description": "Presses/releases closer together than this count as spam. After 'Spam: inputs in a row' of them, wave inputs go straight to the game until you pause. 16 ticks = 4 frames at 60fps (about 7 clicks/sec). Raise it if spam still gets buffered, lower it if tight wave parts stop being buffered.",
 			"default": 16,
 			"min": 4,
 			"max": 40
+		},
+		"wave-spam-streak": {
+			"type": "int",
+			"name": "Spam: inputs in a row",
+			"description": "How many fast presses/releases in a row it takes before spam goes straight to the game (wave, ship, and smart UFO / ball / swing). Lower = spam is let through sooner; higher = more fast inputs are still buffered.",
+			"default": 3,
+			"min": 2,
+			"max": 6
 		},
 		"orb-align": {
 			"type": "bool",
@@ -175,10 +183,22 @@
 			"description": "Remembers, per level and per spot, which delays worked, where saves ended in deaths and where you keep dying. Delays that worked before are tried first; spots where saves keep failing are left alone; orange dots in the path view mark spots where you die a lot. F11 forgets the current level.",
 			"default": true
 		},
+		"auto-click": {
+			"type": "bool",
+			"name": "Auto-click",
+			"description": "When you're not holding and doing nothing would crash within the auto-release window, but a click right now (with your usual hold) is fully safe, the mod clicks for you. Your own click, if it still comes, is ignored. Cube, ball, UFO, robot, spider and swing (not wave / ship). Practice mode only, unless 'Auto-release in normal runs' is on; then AUTO INPUTS ON shows on screen. Runs with this aren't legit.",
+			"default": false
+		},
+		"predict-through-portals": {
+			"type": "bool",
+			"name": "Predict through portals",
+			"description": "Predictions keep going through mode portals (cube, ship, ball, UFO, wave, robot, spider, swing): the hidden ghost switches mode there instead of the prediction stopping. Dual, solo and teleport portals still stop it. Needs 'Full ghost state' on.",
+			"default": true
+		},
 		"auto-release-normal-runs": {
 			"type": "bool",
 			"name": "Auto-release in normal runs",
-			"description": "Let auto-release (wave / robot / dash) also work outside practice mode. While it can act, an 'AUTO INPUTS ON' tag is shown on screen. Never use it for verified or leaderboard runs.",
+			"description": "Let auto-release (wave / robot / dash) and auto-click also work outside practice mode. While it can act, an 'AUTO INPUTS ON' tag is shown on screen. Never use it for verified or leaderboard runs.",
 			"default": false
 		},
 		"spider-smart": {
@@ -341,8 +361,9 @@
 			"type": "string",
 			"name": "Menu theme",
 			"description": "Colours of the in-game menu.",
-			"default": "Pink",
+			"default": "Purple",
 			"one-of": [
+				"Purple",
 				"Pink",
 				"Blue",
 				"Green",
@@ -353,13 +374,13 @@
 			"type": "string",
 			"name": "Key: change stage",
 			"description": "F1-F12, a letter (A-Z) or a number (0-9). Empty or None = no key.",
-			"default": "F6"
+			"default": "6"
 		},
 		"key-menu": {
 			"type": "string",
 			"name": "Key: open menu",
 			"description": "F1-F12, a letter (A-Z) or a number (0-9). Empty or None = no key.",
-			"default": "F7"
+			"default": "7"
 		},
 		"key-export": {
 			"type": "string",
