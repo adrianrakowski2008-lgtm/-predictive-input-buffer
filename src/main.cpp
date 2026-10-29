@@ -3996,7 +3996,7 @@ $on_mod(Loaded) {
     if (Loader::get()->isModLoaded("square3ang.cbfextrapolate")) {
         say("CBF Extrapolate detected: visual only, predictions unaffected");
     }
-    say("v2.83 loaded. The stage key cycles: 0.5f -> 1f -> 2f -> 4f -> 6f -> 8f -> custom -> off");
+    say("v2.84 loaded. The stage key cycles: 0.5f -> 1f -> 2f -> 4f -> 6f -> 8f -> custom -> off");
 }
 
 class $modify(BufPlayLayer, PlayLayer) {
@@ -4035,6 +4035,13 @@ class $modify(BufPlayLayer, PlayLayer) {
         PlayLayer::destroyPlayer(player, object);
         if (!player || wasDead || !player->m_isDead) {
             return;
+        }
+        // v2.84: if the game still has the button down (a delayed release that hadn't fired
+        // yet, or an auto press), let go now. Dropping the queue alone left the game holding,
+        // so the next attempt started with the icon holding by itself until you clicked.
+        // If you really are still holding, it's pressed again once the attempt starts.
+        if (buf.appliedInput) {
+            sendButton(this, false);
         }
         resetPending();
         buf.appliedInput = false;
@@ -4234,6 +4241,11 @@ class $modify(BufPlayLayer, PlayLayer) {
         benchNeedStart = true;
         endAttempt();
         buf.usedThisAttempt = false;
+        // v2.84: same on a restart (R, checkpoints, practice): never start an attempt with the
+        // game holding a button you already let go of
+        if (buf.appliedInput && !buf.realInput) {
+            sendButton(this, false);
+        }
         resetPending();
         forgetPress();
         refreshAutoTag();
