@@ -690,6 +690,20 @@ namespace {
         }
     }
 
+    // v2.85: what the game itself thinks: is the jump button down for this player?
+    bool gameHolds(PlayerObject* player) {
+        if (!player) {
+            return false;
+        }
+        auto it = player->m_holdingButtons.find(static_cast<int>(PlayerButton::Jump));
+        return it != player->m_holdingButtons.end() && it->second;
+    }
+
+    void syncHeld(PlayLayer* layer) {
+        resetPending();
+        buf.realInput = buf.appliedInput = gameHolds(layer->m_player1);
+    }
+
     void sendButton(PlayLayer* layer, bool down) {
         buf.injecting = true;
         buf.appliedInput = down;
@@ -3500,6 +3514,11 @@ namespace {
         if (buf.sinceInput <= 998) {
             ++buf.sinceInput;
         }
+        // v2.85: nothing is sent to the game while you're dead (a press then carried over into
+        // the next attempt)
+        if (player->m_isDead) {
+            return;
+        }
         if ((buf.avoidMovers || buf.predictMovers) && !watched.empty()) {
             updateWatched();
         }
@@ -3996,7 +4015,7 @@ $on_mod(Loaded) {
     if (Loader::get()->isModLoaded("square3ang.cbfextrapolate")) {
         say("CBF Extrapolate detected: visual only, predictions unaffected");
     }
-    say("v2.84 loaded. The stage key cycles: 0.5f -> 1f -> 2f -> 4f -> 6f -> 8f -> custom -> off");
+    say("v2.85 loaded. The stage key cycles: 0.5f -> 1f -> 2f -> 4f -> 6f -> 8f -> custom -> off");
 }
 
 class $modify(BufPlayLayer, PlayLayer) {
@@ -4257,6 +4276,11 @@ class $modify(BufPlayLayer, PlayLayer) {
         buf.swallowRelease = false;
         drift.active = false;
         PlayLayer::resetLevel();
+        // v2.85: start every attempt from the game's own button state. A release you made while
+        // your icon was dead never reached the mod, so it still thought you were holding and
+        // pressed for you as the attempt started (the cube jumped by itself until you clicked).
+        // Now the mod only presses when you press.
+        syncHeld(this);
     }
 
     void togglePracticeMode(bool practiceMode) {
