@@ -218,6 +218,7 @@ namespace {
         bool portalPredict = true;   // v2.79: ghosts switch mode at mode portals instead of stopping
         bool ghostSwitched = false;  // v2.79: the ghost changed mode through a portal in this run
         int tps = 240;               // v2.79: physics steps per second (setting)
+        PlayLayer* owner = nullptr;  // v2.86: the level the mod has set up (null while one loads)
         bool haveStartRects = false; // v2.79: realRect1/2 hold where you are as this prediction starts (portal check)
         int spamGap = 16;            // v2.5.2: inputs closer than this (ticks) count toward wave spam
         bool waveMargin = true;      // v2.10: center wave saves in the safe window (1 tick of room)
@@ -653,6 +654,10 @@ namespace {
         watched.clear();
         drift.active = false;
         resetPending();
+        // v2.86: a level you left can't leave a "button down" behind for the next one
+        buf.realInput = false;
+        buf.appliedInput = false;
+        buf.owner = nullptr;
     }
 
     // PERF: v1 created ghosts with the PlayLayer as their parent layer and put them in
@@ -4015,7 +4020,7 @@ $on_mod(Loaded) {
     if (Loader::get()->isModLoaded("square3ang.cbfextrapolate")) {
         say("CBF Extrapolate detected: visual only, predictions unaffected");
     }
-    say("v2.85 loaded. The stage key cycles: 0.5f -> 1f -> 2f -> 4f -> 6f -> 8f -> custom -> off");
+    say("v2.86 loaded. The stage key cycles: 0.5f -> 1f -> 2f -> 4f -> 6f -> 8f -> custom -> off");
 }
 
 class $modify(BufPlayLayer, PlayLayer) {
@@ -4059,7 +4064,7 @@ class $modify(BufPlayLayer, PlayLayer) {
         // yet, or an auto press), let go now. Dropping the queue alone left the game holding,
         // so the next attempt started with the icon holding by itself until you clicked.
         // If you really are still holding, it's pressed again once the attempt starts.
-        if (buf.appliedInput) {
+        if (buf.appliedInput && buf.owner == this) {
             sendButton(this, false);
         }
         resetPending();
@@ -4236,6 +4241,7 @@ class $modify(BufPlayLayer, PlayLayer) {
         buf.sinceInput = 999;
         buf.rapid = 0;
         forgetPress();
+        buf.owner = this;
         return true;
     }
 
@@ -4262,6 +4268,12 @@ class $modify(BufPlayLayer, PlayLayer) {
         buf.usedThisAttempt = false;
         // v2.84: same on a restart (R, checkpoints, practice): never start an attempt with the
         // game holding a button you already let go of
+        // v2.86: the game also restarts the attempt while the level is still loading; sending
+        // a button then (v2.84/v2.85) crashed when you left a level and opened one again
+        if (buf.owner != this) {
+            PlayLayer::resetLevel();
+            return;
+        }
         if (buf.appliedInput && !buf.realInput) {
             sendButton(this, false);
         }
