@@ -1,9 +1,10 @@
 {
 	"geode": "5.11.2",
 	"gd": {
-		"win": "2.2081"
+		"win": "2.2081",
+		"android": "2.2081"
 	},
-	"version": "v2.81.0",
+	"version": "v2.82.0",
 	"id": "basu.input-buffer",
 	"name": "Click Before Frames",
 	"developer": "BASU",
@@ -43,7 +44,8 @@
 			"type": "bool",
 			"name": "Debug console window",
 			"description": "Also open a separate Windows console with the same log as the in-game console (F9). Needs a restart.",
-			"default": false
+			"default": false,
+			"platforms": ["windows"]
 		},
 		"ground-horizon": {
 			"type": "int",

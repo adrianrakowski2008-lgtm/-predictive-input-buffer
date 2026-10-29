@@ -31,7 +31,9 @@
 #include <map>
 #include <Geode/modify/PlayerObject.hpp>
 #include <Geode/modify/RingObject.hpp>
+#ifdef GEODE_IS_WINDOWS
 #include <Windows.h>
+#endif
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -3714,6 +3716,12 @@ private:
         exportConsole();
     }
 
+    void onConsole(CCObject*) {
+        buf.panelOpen = !buf.panelOpen;
+        refreshPanel();
+        say("console {}", buf.panelOpen ? "shown" : "hidden");
+    }
+
     // v2.75 presets: stage + the switches that matter most, in one click
     void onPreset(CCObject* sender) {
         auto* mod = Mod::get();
@@ -3851,13 +3859,16 @@ protected:
         m_status->setScale(0.55f);
         m_status->setColor(m_t.accent);
         m_mainLayer->addChildAtPosition(m_status, Anchor::Bottom, { 0.f, 56.f });
-        m_buttonMenu->addChildAtPosition(textButton("Settings", menu_selector(BufferMenu::onAllSettings), 0.55f), Anchor::Bottom,
-            { -132.f, 26.f });
-        m_buttonMenu->addChildAtPosition(textButton("Stats", menu_selector(BufferMenu::onStats), 0.55f), Anchor::Bottom, { -45.f, 26.f });
-        m_buttonMenu->addChildAtPosition(textButton("Copy log", menu_selector(BufferMenu::onCopyLog), 0.55f), Anchor::Bottom,
-            { 37.f, 26.f });
-        m_buttonMenu->addChildAtPosition(textButton("Forget", menu_selector(BufferMenu::onForget), 0.55f), Anchor::Bottom,
-            { 124.f, 26.f });
+        // v2.82: a Console button too, for phones (no F9 key)
+        m_buttonMenu->addChildAtPosition(textButton("Settings", menu_selector(BufferMenu::onAllSettings), 0.48f), Anchor::Bottom,
+            { -144.f, 26.f });
+        m_buttonMenu->addChildAtPosition(textButton("Stats", menu_selector(BufferMenu::onStats), 0.48f), Anchor::Bottom, { -74.f, 26.f });
+        m_buttonMenu->addChildAtPosition(textButton("Console", menu_selector(BufferMenu::onConsole), 0.48f), Anchor::Bottom,
+            { -4.f, 26.f });
+        m_buttonMenu->addChildAtPosition(textButton("Copy log", menu_selector(BufferMenu::onCopyLog), 0.48f), Anchor::Bottom,
+            { 74.f, 26.f });
+        m_buttonMenu->addChildAtPosition(textButton("Forget", menu_selector(BufferMenu::onForget), 0.48f), Anchor::Bottom,
+            { 148.f, 26.f });
 
         // presets + run check
         char const* presets[] = { "Safe", "Balanced", "Aggressive" };
@@ -3971,19 +3982,21 @@ $on_mod(Loaded) {
     }
     readSettings();
     applyStage();
+#ifdef GEODE_IS_WINDOWS
     if (buf.console) {
         AllocConsole();
         FILE* out = nullptr;
         freopen_s(&out, "CONOUT$", "w", stdout);
         SetConsoleTitleA("Click Before Frames - Live Console");
     }
+#endif
     if (Loader::get()->isModLoaded("syzzi.click_between_frames")) {
         say("Click Between Frames detected: mid-tick sync {}", buf.cbfSync ? "on" : "off");
     }
     if (Loader::get()->isModLoaded("square3ang.cbfextrapolate")) {
         say("CBF Extrapolate detected: visual only, predictions unaffected");
     }
-    say("v2.81 loaded. The stage key cycles: 0.5f -> 1f -> 2f -> 4f -> 6f -> 8f -> custom -> off");
+    say("v2.82 loaded. The stage key cycles: 0.5f -> 1f -> 2f -> 4f -> 6f -> 8f -> custom -> off");
 }
 
 class $modify(BufPlayLayer, PlayLayer) {

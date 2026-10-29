@@ -1,12 +1,24 @@
-#name: Build Mod
+name: Build Mod
 on:
   workflow_dispatch:
   push:
     branches: [main]
 jobs:
   build:
-    name: Windows
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+        - name: Windows
+          os: windows-latest
+        - name: Android32
+          os: ubuntu-latest
+          target: Android32
+        - name: Android64
+          os: ubuntu-latest
+          target: Android64
+    name: ${{ matrix.config.name }}
+    runs-on: ${{ matrix.config.os }}
     steps:
       - uses: actions/checkout@v4
       - name: Build the mod
@@ -14,6 +26,7 @@ jobs:
         with:
           sdk: stable
           combine: true
+          target: ${{ matrix.config.target }}
   package:
     name: Package builds
     runs-on: ubuntu-latest
