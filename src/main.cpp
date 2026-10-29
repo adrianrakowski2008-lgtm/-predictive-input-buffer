@@ -16,7 +16,8 @@
 //    dead flipGravity hook priority, optional console, in-game console (stage + live log, hidden by default).
 
 #include <Geode/Geode.hpp>
-#include <Geode/modify/CCKeyboardDispatcher.hpp>
+#include <Geode/modify/MenuLayer.hpp>
+#include <Geode/utils/web.hpp>
 #include <Geode/modify/EffectGameObject.hpp>
 #include <Geode/modify/GJBaseGameLayer.hpp>
 #include <Geode/modify/GameObject.hpp>
@@ -44,6 +45,7 @@
 #include <functional>
 #include <fstream>
 #include <sstream>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -158,7 +160,6 @@ namespace {
         bool perfMode = false;   // v2.71: performance mode
         double userBudget = 6.0; // v2.75: the budget from the settings (budgetMs is this click's)
         bool autoBudget = true;  // v2.75: budget follows the frame rate
-        int keys[6] = { 0, 0, 0, 0, 0, 0 };  // v2.75: stage, menu, export, console, path, forget
         std::unordered_set<GameObject*> simDisabled;  // v2.75: objects a toggle orb switched off in this prediction
         std::deque<std::string> logLines;
 
@@ -429,36 +430,11 @@ namespace {
         buf.releaseShift = 0;
     }
 
-    // v2.75: "F6", "G", "7", "None" -> key code (0 = unbound)
-    int parseKey(std::string name) {
-        for (auto& c : name) {
-            c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-        }
-        if (name.size() >= 2 && name[0] == 'F') {
-            int n = std::atoi(name.c_str() + 1);
-            if (n >= 1 && n <= 12) {
-                return KEY_F1 + (n - 1);
-            }
-        }
-        if (name.size() == 1 && name[0] >= 'A' && name[0] <= 'Z') {
-            return KEY_A + (name[0] - 'A');
-        }
-        if (name.size() == 1 && name[0] >= '0' && name[0] <= '9') {
-            return KEY_Zero + (name[0] - '0');
-        }
-        return 0;
-    }
-
     void readSettings() {
         auto* mod = Mod::get();
         buf.smart = mod->getSettingValue<bool>("smart-prediction");
         buf.budgetMs = mod->getSettingValue<double>("sim-budget-ms");
         buf.autoBudget = mod->getSettingValue<bool>("auto-budget");
-        // v2.75 rebindable keys
-        char const* keyNames[] = { "key-stage", "key-menu", "key-export", "key-console", "key-path", "key-forget" };
-        for (int i = 0; i < 6; ++i) {
-            buf.keys[i] = parseKey(mod->getSettingValue<std::string>(keyNames[i]));
-        }
         buf.practiceOnly = mod->getSettingValue<bool>("practice-only");
         buf.groundHorizon = static_cast<int>(mod->getSettingValue<int64_t>("ground-horizon"));
         buf.waveHorizon = static_cast<int>(mod->getSettingValue<int64_t>("wave-horizon"));
@@ -4007,7 +3983,7 @@ $on_mod(Loaded) {
     if (Loader::get()->isModLoaded("square3ang.cbfextrapolate")) {
         say("CBF Extrapolate detected: visual only, predictions unaffected");
     }
-    say("v2.80 loaded. The stage key cycles: 0.5f -> 1f -> 2f -> 4f -> 6f -> 8f -> custom -> off");
+    say("v2.81 loaded. The stage key cycles: 0.5f -> 1f -> 2f -> 4f -> 6f -> 8f -> custom -> off");
 }
 
 class $modify(BufPlayLayer, PlayLayer) {
@@ -4159,11 +4135,11 @@ class $modify(BufPlayLayer, PlayLayer) {
         // v2.79: the hint shows the keys you set
         auto* mod = Mod::get();
         auto keyName = [mod](char const* key) {
-            auto name = mod->getSettingValue<std::string>(key);
-            return name.empty() ? std::string("-") : name;
+            auto binds = mod->getSettingValue<std::vector<Keybind>>(key);
+            return binds.empty() ? std::string("-") : binds.front().toString();
         };
-        auto hintText = fmt::format("{} stage  {} menu  {} copy log  {} console  {} path  {} forget", keyName("key-stage"),
-            keyName("key-menu"), keyName("key-export"), keyName("key-console"), keyName("key-path"), keyName("key-forget"));
+        auto hintText = fmt::format("{} stage  {} menu  {} copy log  {} console  {} path  {} forget", keyName("bind-stage"),
+            keyName("bind-menu"), keyName("bind-export"), keyName("bind-console"), keyName("bind-path"), keyName("bind-forget"));
         auto* hint = CCLabelBMFont::create(hintText.c_str(), "chatFont.fnt");
         hint->setScale(0.45f);
         hint->setColor({ 160, 190, 255 });
@@ -4564,47 +4540,135 @@ class $modify(BufPlayerObject, PlayerObject) {
     }
 };
 
-// F6 via the game's own keyboard events: no polling, and it only fires while GD has
-// focus (v1 polled GetAsyncKeyState every physics tick, even when tabbed out).
-class $modify(BufKeyboard, CCKeyboardDispatcher) {
-    bool dispatchKeyboardMSG(enumKeyCodes key, bool isKeyDown, bool isKeyRepeat, double timestamp) {
-        if (isKeyDown && !isKeyRepeat && GameManager::get()->m_playLayer) {
-            // v2.75: rebindable in the settings
-            int k = static_cast<int>(key);
-            auto is = [&](int i) { return buf.keys[i] != 0 && k == buf.keys[i]; };
-            if (is(0)) {
+// v2.81: Geode keybinds (mod settings or Geode's keybinds popup; work without F keys too).
+// Only act inside a level.
+namespace {
+    void keyAction(int action) {
+        auto* layer = GameManager::get()->m_playLayer;
+        if (!layer) {
+            return;
+        }
+        switch (action) {
+            case 0:
                 cycleStage();
-            }
-            else if (is(1)) {
-                auto* layer = GameManager::get()->m_playLayer;
-                if (layer && !layer->m_isPaused) {
+                break;
+            case 1:
+                if (!layer->m_isPaused) {
                     layer->pauseGame(true);
                 }
                 BufferMenu::open();
-            }
-            else if (is(3)) {
+                break;
+            case 2:
+                exportConsole();
+                break;
+            case 3:
                 buf.panelOpen = !buf.panelOpen;
                 refreshPanel();
-            }
-            else if (is(2)) {
-                exportConsole();
-            }
-            else if (is(5)) {
-                memory.clear();
-                pending.active = false;
-                memoryDirty = true;
-                saveMemory();
-                say("memory for this level cleared");
-            }
-            else if (is(4)) {
+                break;
+            case 4:
                 buf.showPath = !buf.showPath;
                 if (buf.pathNode) {
                     buf.pathNode->clear();
                 }
                 say("path view {}", buf.showPath ? "on" : "off");
-            }
+                break;
+            case 5:
+                memory.clear();
+                pending.active = false;
+                memoryDirty = true;
+                saveMemory();
+                say("memory for this level cleared");
+                break;
         }
-        return CCKeyboardDispatcher::dispatchKeyboardMSG(key, isKeyDown, isKeyRepeat, timestamp);
+    }
+
+    void setupKeybinds() {
+        char const* binds[] = { "bind-stage", "bind-menu", "bind-export", "bind-console", "bind-path", "bind-forget" };
+        for (int i = 0; i < 6; ++i) {
+            listenForKeybindSettingPresses(binds[i], [i](Keybind const&, bool down, bool repeat, double) {
+                if (down && !repeat) {
+                    keyAction(i);
+                }
+                return false;
+            });
+        }
+    }
+
+    // v2.81 update check: once per game start, reads the version in the public repo's mod.json
+    // (in the background) and says so on the main menu if a newer one is out.
+    constexpr char const* REPO_URL = "https://github.com/raresdalas1009/-predictive-input-buffer";
+    std::string latestVersion;
+    bool updateChecked = false;
+    bool updateShown = false;
+
+    void showUpdatePopup() {
+        if (updateShown || latestVersion.empty() || !CCScene::get()) {
+            return;
+        }
+        updateShown = true;
+        say("update: {} is out (you have {})", latestVersion, Mod::get()->getVersion().toVString());
+        createQuickPopup("Click Before Frames", fmt::format("<cp>{}</c> is out! You have {}.", latestVersion,
+            Mod::get()->getVersion().toVString()), "Later", "Open page", [](FLAlertLayer*, bool open) {
+                if (open) {
+                    web::openLinkInBrowser(REPO_URL);
+                }
+            });
+    }
+
+    void checkForUpdate() {
+        if (updateChecked || !Mod::get()->getSettingValue<bool>("check-updates")) {
+            return;
+        }
+        updateChecked = true;
+        std::thread([] {
+            auto res = web::WebRequest()
+                .timeout(std::chrono::seconds(10))
+                .getSync("https://raw.githubusercontent.com/raresdalas1009/-predictive-input-buffer/main/mod.json");
+            if (!res.ok()) {
+                return;
+            }
+            auto text = res.string();
+            if (!text) {
+                return;
+            }
+            auto json = matjson::parse(*text);
+            if (!json) {
+                return;
+            }
+            auto version = (*json)["version"].asString();
+            if (!version) {
+                return;
+            }
+            auto latest = VersionInfo::parse(*version);
+            if (!latest || !(*latest > Mod::get()->getVersion())) {
+                return;
+            }
+            std::string name = latest->toVString();
+            queueInMainThread([name] {
+                latestVersion = name;
+                auto* scene = CCScene::get();
+                if (scene && scene->getChildByType<MenuLayer>(0)) {
+                    showUpdatePopup();
+                }
+            });
+        }).detach();
+    }
+}
+
+$on_mod(Loaded) {
+    setupKeybinds();
+}
+
+class $modify(BufMenuLayer, MenuLayer) {
+    bool init() {
+        if (!MenuLayer::init()) {
+            return false;
+        }
+        checkForUpdate();
+        if (!latestVersion.empty() && !updateShown) {
+            queueInMainThread([] { showUpdatePopup(); });
+        }
+        return true;
     }
 };
 

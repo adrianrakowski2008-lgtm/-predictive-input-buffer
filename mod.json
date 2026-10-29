@@ -3,7 +3,7 @@
 	"gd": {
 		"win": "2.2081"
 	},
-	"version": "v2.80.0",
+	"version": "v2.81.0",
 	"id": "basu.input-buffer",
 	"name": "Click Before Frames",
 	"developer": "BASU",
@@ -357,6 +357,12 @@
 			"description": "While the game is already dropping frames (a frame took over twice as long as it should, and over 20 ms), clicks get at most 4 ms of prediction time so it doesn't get worse. Otherwise the time budget setting is used as it is.",
 			"default": true
 		},
+		"check-updates": {
+			"type": "bool",
+			"name": "Check for updates",
+			"description": "On game start, check GitHub for a newer version and show a popup on the main menu if there is one.",
+			"default": true
+		},
 		"tps": {
 			"type": "int",
 			"name": "Physics TPS",
@@ -386,41 +392,47 @@
 				"Dark"
 			]
 		},
-		"key-stage": {
-			"type": "string",
+		"bind-stage": {
+			"type": "keybind",
 			"name": "Key: change stage",
-			"description": "F1-F12, a letter (A-Z) or a number (0-9). Empty or None = no key.",
-			"default": "6"
+			"description": "Works inside a level. Change it here or in Geode's keybinds popup.",
+			"category": "gameplay",
+			"default": ["Six"]
 		},
-		"key-menu": {
-			"type": "string",
+		"bind-menu": {
+			"type": "keybind",
 			"name": "Key: open menu",
-			"description": "F1-F12, a letter (A-Z) or a number (0-9). Empty or None = no key.",
-			"default": "7"
+			"description": "Works inside a level. Change it here or in Geode's keybinds popup.",
+			"category": "gameplay",
+			"default": ["Seven"]
 		},
-		"key-export": {
-			"type": "string",
+		"bind-export": {
+			"type": "keybind",
 			"name": "Key: copy console log",
-			"description": "F1-F12, a letter (A-Z) or a number (0-9). Empty or None = no key.",
-			"default": "F8"
+			"description": "Works inside a level. Change it here or in Geode's keybinds popup.",
+			"category": "gameplay",
+			"default": ["F8"]
 		},
-		"key-console": {
-			"type": "string",
+		"bind-console": {
+			"type": "keybind",
 			"name": "Key: show / hide console",
-			"description": "F1-F12, a letter (A-Z) or a number (0-9). Empty or None = no key.",
-			"default": "F9"
+			"description": "Works inside a level. Change it here or in Geode's keybinds popup.",
+			"category": "gameplay",
+			"default": ["F9"]
 		},
-		"key-path": {
-			"type": "string",
+		"bind-path": {
+			"type": "keybind",
 			"name": "Key: path view",
-			"description": "F1-F12, a letter (A-Z) or a number (0-9). Empty or None = no key.",
-			"default": "F10"
+			"description": "Works inside a level. Change it here or in Geode's keybinds popup.",
+			"category": "gameplay",
+			"default": ["F10"]
 		},
-		"key-forget": {
-			"type": "string",
+		"bind-forget": {
+			"type": "keybind",
 			"name": "Key: forget this level",
-			"description": "F1-F12, a letter (A-Z) or a number (0-9). Empty or None = no key.",
-			"default": "F11"
+			"description": "Works inside a level. Change it here or in Geode's keybinds popup.",
+			"category": "gameplay",
+			"default": ["F11"]
 		}
 	},
 	"resources": {
