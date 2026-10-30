@@ -75,3 +75,4 @@ Practice use only; do not use for verified or leaderboard runs.
 - v2.85: the cube no longer jumps by itself at the start of an attempt: a release made while your icon was dead never reached the mod, which then pressed for you when the attempt started. Every attempt now starts from the game's own button state.
 - v2.86: fixed a crash when leaving a level and opening one again (v2.84/v2.85 could send a button to a level that was still loading); leaving a level now also forgets the button state.
 - v2.87: Android crash when leaving a level fixed: the hidden ghost players were deleted while the level was still being torn down; on Android they're now only let go of.
+- v2.88: dash orbs no longer flash before you reach them: effects a prediction ghost added to the real level (the dash start effect) are removed after each prediction.

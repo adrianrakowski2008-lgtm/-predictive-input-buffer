@@ -1409,7 +1409,46 @@ namespace {
         buf.snapshots.push_back(s);
     }
 
+    // v2.88: anything a ghost added to the real level during a prediction (the dash start
+    // effect of dash orbs, bursts...) is removed afterwards. Dash orbs still flashed before
+    // you reached them: those effects go onto the level's layers, not the ghost's own.
+    struct NodeMark {
+        CCNode* node;
+        unsigned count;
+    };
+    std::vector<NodeMark> levelMarks;
+
+    void markLevelNodes(PlayLayer* layer) {
+        levelMarks.clear();
+        auto add = [](CCNode* n) {
+            if (n) {
+                levelMarks.push_back({ n, n->getChildrenCount() });
+            }
+        };
+        add(layer);
+        add(layer->m_objectLayer);
+        if (layer->m_aboveShaderObjectLayer != layer->m_objectLayer) {
+            add(layer->m_aboveShaderObjectLayer);
+        }
+        if (layer->m_objectLayer && layer->m_objectLayer->getChildren()) {
+            for (auto* child : CCArrayExt<CCNode*>(layer->m_objectLayer->getChildren())) {
+                add(child);
+            }
+        }
+    }
+
+    void sweepLevelNodes() {
+        for (auto const& m : levelMarks) {
+            auto* kids = m.node->getChildren();
+            while (kids && kids->count() > m.count) {
+                m.node->removeChild(static_cast<CCNode*>(kids->lastObject()), true);
+            }
+        }
+        levelMarks.clear();
+    }
+
     void restoreObjects() {
+        sweepLevelNodes();
         for (auto const& s : buf.snapshots) {
             s.object->m_isActivated = s.isActivated;
             if (s.effect) {
@@ -1503,6 +1542,7 @@ namespace {
             return horizon;
         }
         buf.simulating = true;
+        markLevelNodes(layer);
         buf.ghostDied = false;
         buf.ghostHitPortal = false;
         buf.firstOrbTick = -1;
@@ -2562,6 +2602,7 @@ namespace {
             return;
         }
         buf.simulating = true;
+        markLevelNodes(layer);
         buf.ghostDied = false;
         buf.ghostHitPortal = false;
         buf.haveRealRect = false;
@@ -4030,7 +4071,7 @@ $on_mod(Loaded) {
     if (Loader::get()->isModLoaded("square3ang.cbfextrapolate")) {
         say("CBF Extrapolate detected: visual only, predictions unaffected");
     }
-    say("v2.87 loaded. The stage key cycles: 0.5f -> 1f -> 2f -> 4f -> 6f -> 8f -> custom -> off");
+    say("v2.88 loaded. The stage key cycles: 0.5f -> 1f -> 2f -> 4f -> 6f -> 8f -> custom -> off");
 }
 
 class $modify(BufPlayLayer, PlayLayer) {
