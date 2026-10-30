@@ -625,6 +625,15 @@ namespace {
     }
 
     void dropGhosts() {
+#ifdef GEODE_IS_ANDROID
+        // v2.87 Android: the ghosts are linked to the level that is closing, and deleting them
+        // while it was being torn down crashed on Android (the freed memory is reused at once,
+        // so the crash showed up in random other mods: music, labels, the scheduler). They're
+        // only let go of here; a hidden player per level is a small cost.
+        buf.ghost1 = nullptr;
+        buf.ghost2 = nullptr;
+        buf.ghostLayer = nullptr;
+#else
         for (auto** g : { &buf.ghost1, &buf.ghost2 }) {
             if (*g) {
                 (*g)->removeFromParentAndCleanup(true);
@@ -637,6 +646,7 @@ namespace {
             buf.ghostLayer->release();
             buf.ghostLayer = nullptr;
         }
+#endif
         // panel nodes are owned by the PlayLayer
         buf.panel = nullptr;
         buf.panelTitle = nullptr;
@@ -4020,7 +4030,7 @@ $on_mod(Loaded) {
     if (Loader::get()->isModLoaded("square3ang.cbfextrapolate")) {
         say("CBF Extrapolate detected: visual only, predictions unaffected");
     }
-    say("v2.86 loaded. The stage key cycles: 0.5f -> 1f -> 2f -> 4f -> 6f -> 8f -> custom -> off");
+    say("v2.87 loaded. The stage key cycles: 0.5f -> 1f -> 2f -> 4f -> 6f -> 8f -> custom -> off");
 }
 
 class $modify(BufPlayLayer, PlayLayer) {
