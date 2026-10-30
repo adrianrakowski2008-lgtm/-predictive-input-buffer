@@ -3999,7 +3999,7 @@ class $modify(BufEndLevelLayer, EndLevelLayer) {
             return;
         }
         auto win = CCDirector::get()->getWinSize();
-        auto* label = CCLabelBMFont::create("Click Before Frames was on", "bigFont.fnt");
+        auto* label = CCLabelBMFont::create("", "bigFont.fnt");
         label->setScale(0.35f);
         label->setColor({ 150, 205, 255 });
         label->setOpacity(170);
