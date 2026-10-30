@@ -556,7 +556,7 @@ namespace {
         buf.watermark->setVisible(buf.enabled && !(layer && layer->m_isPracticeMode));
         // v2.79: a custom TPS is always shown
         auto tpsText = buf.tps != 240 ? fmt::format("  |  {} TPS", buf.tps) : std::string();
-        buf.watermark->setString(fmt::format("Click Before Frames  |  {}{}", stageText(), tpsText).c_str());
+        buf.watermark->setString(fmt::format("", stageText(), tpsText).c_str());
     }
 
     void refreshAutoTag() {
